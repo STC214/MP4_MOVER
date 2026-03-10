@@ -20,6 +20,7 @@ type Options struct {
 	GroupSize int
 	Now       func() time.Time
 	Progress  func(done, total int, message string)
+	Logf      func(format string, args ...any)
 }
 
 type Result struct {
@@ -59,6 +60,7 @@ type tracker struct {
 	total    int
 	done     int
 	progress func(done, total int, message string)
+	logf     func(format string, args ...any)
 }
 
 func ProcessDirectory(root string, opts Options) (Result, error) {
@@ -77,13 +79,17 @@ func ProcessDirectory(root string, opts Options) (Result, error) {
 
 	t := tracker{
 		progress: opts.Progress,
+		logf:     opts.Logf,
 	}
 	t.report("正在扫描 MP4 文件")
 
+	t.log("process start root=%q group_size=%d", root, groupSize)
 	files, err := scanMP4Files(root)
 	if err != nil {
+		t.log("scan failed: %v", err)
 		return Result{}, err
 	}
+	t.log("scan completed mp4_count=%d", len(files))
 	if len(files) == 0 {
 		return Result{}, errors.New("程序所在目录没有可处理的 mp4 文件")
 	}
@@ -94,24 +100,33 @@ func ProcessDirectory(root string, opts Options) (Result, error) {
 	dateStamp := now().Format("20060102")
 	workPlan, err := buildPlan(root, files, dateStamp, groupSize)
 	if err != nil {
+		t.log("build plan failed: %v", err)
 		return Result{}, err
 	}
 	if err := validatePlan(workPlan); err != nil {
+		t.log("validate plan failed: %v", err)
 		return Result{}, err
 	}
+	t.log("plan ready files=%d groups=%d date=%s", len(workPlan.files), len(workPlan.groups), dateStamp)
 
 	t.total = len(workPlan.files)*3 + len(workPlan.groups)
 	t.report(fmt.Sprintf("共找到 %d 个视频，准备处理", len(workPlan.files)))
 
 	createdDirs := make([]string, 0, len(workPlan.groups))
 	if err := executePlan(workPlan, &t, &createdDirs); err != nil {
+		t.log("execute plan failed: %v", err)
 		rollbackErr := rollbackPlan(workPlan, createdDirs)
+		if rollbackErr != nil {
+			t.log("rollback failed: %v", rollbackErr)
+		}
 		if rollbackErr != nil {
 			return Result{}, fmt.Errorf("%w；回滚失败：%v", err, rollbackErr)
 		}
+		t.log("rollback completed after failure")
 		return Result{}, err
 	}
 
+	t.log("process completed processed=%d groups=%d", len(workPlan.files), len(workPlan.groups))
 	return Result{
 		Processed: len(workPlan.files),
 		Groups:    len(workPlan.groups),
@@ -254,36 +269,44 @@ func validatePlan(workPlan plan) error {
 func executePlan(workPlan plan, t *tracker, createdDirs *[]string) error {
 	for i := range workPlan.files {
 		file := &workPlan.files[i]
+		t.log("temp rename start from=%q to=%q", file.currentPath, file.tempPath)
 		if err := os.Rename(file.currentPath, file.tempPath); err != nil {
 			return fmt.Errorf("暂存重命名失败 %q：%w", filepath.Base(file.currentPath), err)
 		}
 		file.currentPath = file.tempPath
+		t.log("temp rename done to=%q", file.tempPath)
 		t.advance(fmt.Sprintf("正在暂存重命名 %d/%d", i+1, len(workPlan.files)))
 	}
 
 	for i := range workPlan.files {
 		file := &workPlan.files[i]
+		t.log("final rename start from=%q to=%q", file.currentPath, file.finalPath)
 		if err := os.Rename(file.currentPath, file.finalPath); err != nil {
 			return fmt.Errorf("正式重命名失败 %q：%w", filepath.Base(file.originalPath), err)
 		}
 		file.currentPath = file.finalPath
+		t.log("final rename done to=%q", file.finalPath)
 		t.advance(fmt.Sprintf("正在生成目标文件名 %d/%d", i+1, len(workPlan.files)))
 	}
 
 	for i := range workPlan.groups {
 		group := &workPlan.groups[i]
+		t.log("create group dir start path=%q", group.path)
 		if err := os.Mkdir(group.path, 0o755); err != nil {
 			return fmt.Errorf("创建子文件夹失败 %q：%w", group.name, err)
 		}
 		*createdDirs = append(*createdDirs, group.path)
+		t.log("create group dir done path=%q", group.path)
 		t.advance(fmt.Sprintf("已创建子文件夹 %s", group.name))
 
 		for index, file := range group.files {
 			targetPath := filepath.Join(group.path, filepath.Base(file.finalPath))
+			t.log("move into group start from=%q to=%q", file.currentPath, targetPath)
 			if err := os.Rename(file.currentPath, targetPath); err != nil {
 				return fmt.Errorf("移动文件失败 %q：%w", filepath.Base(file.currentPath), err)
 			}
 			file.currentPath = targetPath
+			t.log("move into group done to=%q", targetPath)
 			t.advance(fmt.Sprintf("正在归档分组 %s (%d/%d)", group.name, index+1, len(group.files)))
 		}
 	}
@@ -334,5 +357,12 @@ func (t *tracker) report(message string) {
 
 func (t *tracker) advance(message string) {
 	t.done++
+	t.log("progress done=%d total=%d message=%q", t.done, t.total, message)
 	t.report(message)
+}
+
+func (t *tracker) log(format string, args ...any) {
+	if t.logf != nil {
+		t.logf(format, args...)
+	}
 }

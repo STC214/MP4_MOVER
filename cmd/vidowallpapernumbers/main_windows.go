@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"vido_wallpaper_numbers/internal/diaglog"
 	"vido_wallpaper_numbers/internal/organizer"
 )
 
@@ -28,18 +31,22 @@ const (
 	defaultWindowHeight = 150
 	defaultGroupSize    = 30
 
-	wmCreate       = 0x0001
-	wmDestroy      = 0x0002
-	wmClose        = 0x0010
-	wmPaint        = 0x000F
-	wmGetText      = 0x000D
-	wmSize         = 0x0005
-	wmSetFont      = 0x0030
-	wmCtlColorEdit = 0x0133
-	wmLButtonDown  = 0x0201
-	wmLButtonUp    = 0x0202
-	wmApp          = 0x8000
-	wmWorkerEvent  = wmApp + 1
+	wmCreate        = 0x0001
+	wmDestroy       = 0x0002
+	wmClose         = 0x0010
+	wmPaint         = 0x000F
+	wmGetText       = 0x000D
+	wmSetFocus      = 0x0007
+	wmSize          = 0x0005
+	wmSetFont       = 0x0030
+	wmCtlColorEdit  = 0x0133
+	wmMouseMove     = 0x0200
+	wmLButtonDown   = 0x0201
+	wmLButtonUp     = 0x0202
+	wmLButtonDblClk = 0x0203
+	wmApp           = 0x8000
+	wmWorkerEvent   = wmApp + 1
+	wmHealthPing    = wmApp + 2
 
 	wsOverlapped   = 0x00000000
 	wsCaption      = 0x00C00000
@@ -57,7 +64,9 @@ const (
 	mbIconError    = 0x00000010
 	mbIconWarning  = 0x00000030
 	mbOK           = 0x00000000
+	gwlpWndProc    = -4
 	emSetLimitText = 0x00C5
+	emSetSel       = 0x00B1
 
 	imageIcon       = 1
 	lrDefaultColor  = 0x0000
@@ -144,20 +153,25 @@ type appConfig struct {
 }
 
 type appWindow struct {
-	hwnd          hwnd
-	groupInput    hwnd
-	font          uintptr
-	inputFont     uintptr
-	events        chan workerEvent
-	running       bool
-	exeDir        string
-	configPath    string
-	config        appConfig
-	progressPct   int
-	buttonPressed bool
-	buttonRect    rect
-	progressRect  rect
-	eventPosted   uint32
+	hwnd           hwnd
+	groupInput     hwnd
+	groupInputProc uintptr
+	font           uintptr
+	inputFont      uintptr
+	events         chan workerEvent
+	running        bool
+	exeDir         string
+	configPath     string
+	config         appConfig
+	progressPct    int
+	buttonPressed  bool
+	buttonRect     rect
+	progressRect   rect
+	eventPosted    uint32
+	dragLogged     uint32
+	lastHealthPing int64
+	lastHealthPong int64
+	watchdogStop   chan struct{}
 }
 
 type theme struct {
@@ -182,8 +196,10 @@ type theme struct {
 
 var (
 	currentApp = &appWindow{
-		events: make(chan workerEvent, 256),
+		events:       make(chan workerEvent, 256),
+		watchdogStop: make(chan struct{}),
 	}
+	editWndProcCallback = syscall.NewCallback(groupInputProc)
 
 	user32   = syscall.NewLazyDLL("user32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
@@ -192,6 +208,7 @@ var (
 
 	procBeginPaint          = user32.NewProc("BeginPaint")
 	procCreateWindowEx      = user32.NewProc("CreateWindowExW")
+	procCallWindowProc      = user32.NewProc("CallWindowProcW")
 	procDefWindowProc       = user32.NewProc("DefWindowProcW")
 	procDestroyWindow       = user32.NewProc("DestroyWindow")
 	procDispatchMessage     = user32.NewProc("DispatchMessageW")
@@ -213,12 +230,15 @@ var (
 	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
 	procRegisterClassEx     = user32.NewProc("RegisterClassExW")
 	procSendMessage         = user32.NewProc("SendMessageW")
+	procSetFocus            = user32.NewProc("SetFocus")
+	procSetWindowLongPtr    = user32.NewProc("SetWindowLongPtrW")
 	procSetWindowText       = user32.NewProc("SetWindowTextW")
 	procShowWindow          = user32.NewProc("ShowWindow")
 	procTranslateMessage    = user32.NewProc("TranslateMessage")
 	procUpdateWindow        = user32.NewProc("UpdateWindow")
 
-	procGetModuleHandle = kernel32.NewProc("GetModuleHandleW")
+	procGetModuleHandle    = kernel32.NewProc("GetModuleHandleW")
+	procGetCurrentThreadID = kernel32.NewProc("GetCurrentThreadId")
 
 	procCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
 	procCreateFont       = gdi32.NewProc("CreateFontW")
@@ -233,6 +253,8 @@ var (
 )
 
 func main() {
+	defer handleMainPanic()
+
 	exePath, err := os.Executable()
 	if err != nil {
 		showMessage(0, "无法确定程序所在目录："+err.Error(), mbIconError|mbOK)
@@ -242,13 +264,20 @@ func main() {
 	currentApp.exeDir = filepath.Dir(exePath)
 	currentApp.configPath = filepath.Join(currentApp.exeDir, appConfigFile)
 	if err := run(); err != nil {
+		diaglog.Logf("run failed: %v", err)
 		showMessage(0, err.Error(), mbIconError|mbOK)
 	}
 }
 
 func run() error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	diaglog.Logf("run start")
+	diaglog.Logf("ui thread locked tid=%d", currentThreadID())
 	initTheme()
 	currentApp.loadConfig()
+	diaglog.Logf("config loaded window=(%d,%d %dx%d) group_size=%d", currentApp.config.WindowX, currentApp.config.WindowY, currentApp.config.Width, currentApp.config.Height, currentApp.config.GroupSize)
 
 	instance, err := getModuleHandle()
 	if err != nil {
@@ -281,6 +310,7 @@ func run() error {
 	if atom == 0 {
 		return fmt.Errorf("注册窗口类失败：%v", registerErr)
 	}
+	diaglog.Logf("window class registered")
 
 	style := uintptr(wsOverlapped | wsCaption | wsSysMenu | wsMinimizeBox | wsVisible)
 	title := utf16Ptr(appTitle)
@@ -304,6 +334,7 @@ func run() error {
 	}
 
 	currentApp.hwnd = hwnd(handle)
+	diaglog.Logf("window created hwnd=%#x tid=%d", handle, currentThreadID())
 	applyDarkTitleBar(currentApp.hwnd)
 	currentApp.layout()
 	invalidate(currentApp.hwnd)
@@ -317,6 +348,7 @@ func run() error {
 		case -1:
 			return fmt.Errorf("消息循环失败")
 		case 0:
+			diaglog.Logf("message loop exit tid=%d", currentThreadID())
 			return nil
 		default:
 			procTranslateMessage.Call(uintptr(unsafe.Pointer(&message)))
@@ -325,9 +357,66 @@ func run() error {
 	}
 }
 
+func handleMainPanic() {
+	if recovered := recover(); recovered != nil {
+		diaglog.Logf("panic in main: %v\n%s", recovered, debug.Stack())
+		showMessage(0, fmt.Sprintf("程序发生未处理异常：%v", recovered), mbIconError|mbOK)
+	}
+}
+
+func (a *appWindow) handleWorkerPanic() {
+	if recovered := recover(); recovered != nil {
+		diaglog.Logf("panic in worker: %v\n%s", recovered, debug.Stack())
+		a.pushEvent(workerEvent{
+			finished: true,
+			err:      fmt.Errorf("程序内部异常：%v", recovered),
+		})
+	}
+}
+
+func (a *appWindow) startWatchdog() {
+	atomic.StoreInt64(&a.lastHealthPing, time.Now().UnixNano())
+	atomic.StoreInt64(&a.lastHealthPong, time.Now().UnixNano())
+
+	go func(window hwnd) {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				pingAt := time.Now()
+				atomic.StoreInt64(&a.lastHealthPing, pingAt.UnixNano())
+				ret, _, _ := procPostMessage.Call(uintptr(window), wmHealthPing, 0, 0)
+				if ret == 0 {
+					diaglog.Logf("watchdog failed to post health ping hwnd=%#x", window)
+					continue
+				}
+
+				lastPong := atomic.LoadInt64(&a.lastHealthPong)
+				if pingAt.UnixNano()-lastPong > int64(6*time.Second) {
+					diaglog.Logf("watchdog detected ui heartbeat delay delay_ms=%d running=%t progress=%d queue_len=%d", (pingAt.UnixNano()-lastPong)/int64(time.Millisecond), a.running, a.progressPct, len(a.events))
+				}
+			case <-a.watchdogStop:
+				diaglog.Logf("watchdog stopped")
+				return
+			}
+		}
+	}(a.hwnd)
+}
+
+func (a *appWindow) stopWatchdog() {
+	select {
+	case <-a.watchdogStop:
+	default:
+		close(a.watchdogStop)
+	}
+}
+
 func windowProc(window hwnd, message uint32, wParam, lParam uintptr) uintptr {
 	switch message {
 	case wmCreate:
+		diaglog.Logf("window message create")
 		currentApp.hwnd = window
 		if err := currentApp.createControls(window); err != nil {
 			showMessage(window, err.Error(), mbIconError|mbOK)
@@ -338,6 +427,7 @@ func windowProc(window hwnd, message uint32, wParam, lParam uintptr) uintptr {
 		currentApp.setStatus("每组 1-1000，默认 30")
 		return 0
 	case wmSize:
+		diaglog.Logf("window message size")
 		currentApp.hwnd = window
 		currentApp.layout()
 		invalidate(window)
@@ -369,7 +459,12 @@ func windowProc(window hwnd, message uint32, wParam, lParam uintptr) uintptr {
 	case wmWorkerEvent:
 		currentApp.handleWorkerMessage()
 		return 0
+	case wmHealthPing:
+		atomic.StoreInt64(&currentApp.lastHealthPong, time.Now().UnixNano())
+		diaglog.Logf("window message health ping acknowledged tid=%d", currentThreadID())
+		return 0
 	case wmClose:
+		diaglog.Logf("window message close running=%t", currentApp.running)
 		if currentApp.running {
 			showMessage(window, "任务正在执行，请等待完成后再关闭。", mbIconWarning|mbOK)
 			return 0
@@ -380,6 +475,8 @@ func windowProc(window hwnd, message uint32, wParam, lParam uintptr) uintptr {
 		procDestroyWindow.Call(uintptr(window))
 		return 0
 	case wmDestroy:
+		currentApp.stopWatchdog()
+		diaglog.Logf("window message destroy")
 		procPostQuitMessage.Call(0)
 		return 0
 	}
@@ -389,6 +486,7 @@ func windowProc(window hwnd, message uint32, wParam, lParam uintptr) uintptr {
 }
 
 func (a *appWindow) createControls(window hwnd) error {
+	diaglog.Logf("create controls start")
 	font, _, _ := procGetStockObject.Call(defaultGUIFont)
 	a.font = font
 	a.inputFont = createFont(-22, 600, "Segoe UI")
@@ -416,6 +514,30 @@ func (a *appWindow) createControls(window hwnd) error {
 	a.groupInput = groupInput
 	sendMessage(groupInput, wmSetFont, a.inputFont, 1)
 	sendMessage(groupInput, emSetLimitText, 4, 0)
+	if err := a.installGroupInputProc(); err != nil {
+		return err
+	}
+	diaglog.Logf("create controls done group_input=%#x", groupInput)
+	return nil
+}
+
+func (a *appWindow) installGroupInputProc() error {
+	if a.groupInput == 0 {
+		return nil
+	}
+
+	wndProcIndex := int32(gwlpWndProc)
+	oldProc, _, err := procSetWindowLongPtr.Call(
+		uintptr(a.groupInput),
+		uintptr(wndProcIndex),
+		editWndProcCallback,
+	)
+	if oldProc == 0 {
+		return fmt.Errorf("安装数字输入框消息处理失败：%v", err)
+	}
+
+	a.groupInputProc = oldProc
+	diaglog.Logf("group input subclass installed hwnd=%#x old_proc=%#x", a.groupInput, oldProc)
 	return nil
 }
 
@@ -465,6 +587,7 @@ func (a *appWindow) layout() {
 		Right:  int32(left + rowWidth),
 		Bottom: int32(progressTop + progressHeight),
 	}
+	diaglog.Logf("layout updated input=(%d,%d,%d,%d) button=(%d,%d,%d,%d) progress=(%d,%d,%d,%d)", left, top, inputWidth, rowHeight, a.buttonRect.Left, a.buttonRect.Top, a.buttonRect.Right, a.buttonRect.Bottom, a.progressRect.Left, a.progressRect.Top, a.progressRect.Right, a.progressRect.Bottom)
 }
 
 func (a *appWindow) paint(window hwnd) {
@@ -483,6 +606,7 @@ func (a *appWindow) startWork() {
 
 	groupSize, err := a.groupSize()
 	if err != nil {
+		diaglog.Logf("start work blocked by invalid group size: %v", err)
 		showMessage(a.hwnd, err.Error(), mbIconWarning|mbOK)
 		return
 	}
@@ -492,11 +616,14 @@ func (a *appWindow) startWork() {
 	enableWindow(a.groupInput, false)
 	a.setProgress(0)
 	a.setStatus("正在处理")
+	diaglog.Logf("start work group_size=%d exe_dir=%q", groupSize, a.exeDir)
 
 	go func(exeDir string, groupSize int) {
+		defer a.handleWorkerPanic()
 		result, err := organizer.ProcessDirectory(exeDir, organizer.Options{
 			GroupSize: groupSize,
 			Now:       time.Now,
+			Logf:      diaglog.Logf,
 			Progress: func(done, total int, message string) {
 				a.pushEvent(workerEvent{
 					done:    done,
@@ -506,6 +633,7 @@ func (a *appWindow) startWork() {
 			},
 		})
 		if err != nil {
+			diaglog.Logf("worker finished with error: %v", err)
 			a.pushEvent(workerEvent{
 				finished: true,
 				err:      err,
@@ -519,6 +647,7 @@ func (a *appWindow) startWork() {
 			message:  fmt.Sprintf("处理完成：%d 个视频，%d 个子文件夹，每组 %d 个", result.Processed, result.Groups, groupSize),
 			finished: true,
 		})
+		diaglog.Logf("worker finished successfully processed=%d groups=%d", result.Processed, result.Groups)
 	}(a.exeDir, groupSize)
 
 }
@@ -536,6 +665,7 @@ func (a *appWindow) drainEvents() {
 
 func (a *appWindow) handleWorkerMessage() {
 	atomic.StoreUint32(&a.eventPosted, 0)
+	diaglog.Logf("handle worker message queue_len=%d", len(a.events))
 	a.drainEvents()
 	if len(a.events) > 0 {
 		a.postWorkerMessage()
@@ -551,6 +681,7 @@ func (a *appWindow) handleEvent(event workerEvent) {
 		a.setStatus(event.message)
 	}
 	if event.finished {
+		diaglog.Logf("handle finished event err=%v progress=%d", event.err, a.progressPct)
 		a.running = false
 		enableWindow(a.groupInput, true)
 		invalidate(a.hwnd)
@@ -565,6 +696,7 @@ func (a *appWindow) handleEvent(event workerEvent) {
 
 func (a *appWindow) pushEvent(event workerEvent) {
 	if !a.enqueueEvent(event) {
+		diaglog.Logf("drop worker event finished=%t queue_len=%d", event.finished, len(a.events))
 		return
 	}
 	a.postWorkerMessage()
@@ -605,6 +737,7 @@ func (a *appWindow) postWorkerMessage() {
 	}
 	ret, _, _ := procPostMessage.Call(uintptr(a.hwnd), wmWorkerEvent, 0, 0)
 	if ret == 0 {
+		diaglog.Logf("post worker message failed hwnd=%#x", a.hwnd)
 		atomic.StoreUint32(&a.eventPosted, 0)
 	}
 }
@@ -664,16 +797,19 @@ func (a *appWindow) loadConfig() {
 	}
 
 	if a.configPath == "" {
+		diaglog.Logf("load config skipped: empty path")
 		return
 	}
 
 	data, err := os.ReadFile(a.configPath)
 	if err != nil {
+		diaglog.Logf("load config skipped path=%q err=%v", a.configPath, err)
 		return
 	}
 
 	var cfg appConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
+		diaglog.Logf("load config invalid path=%q err=%v", a.configPath, err)
 		return
 	}
 
@@ -688,10 +824,12 @@ func (a *appWindow) loadConfig() {
 	}
 	a.config.WindowX = cfg.WindowX
 	a.config.WindowY = cfg.WindowY
+	diaglog.Logf("load config applied path=%q window=(%d,%d %dx%d) group_size=%d", a.configPath, a.config.WindowX, a.config.WindowY, a.config.Width, a.config.Height, a.config.GroupSize)
 }
 
 func (a *appWindow) saveCurrentConfig() error {
 	if a.configPath == "" || a.hwnd == 0 {
+		diaglog.Logf("save config skipped path=%q hwnd=%#x", a.configPath, a.hwnd)
 		return nil
 	}
 
@@ -723,6 +861,7 @@ func (a *appWindow) saveCurrentConfig() error {
 	}
 
 	a.config = cfg
+	diaglog.Logf("save config done path=%q window=(%d,%d %dx%d) group_size=%d", a.configPath, cfg.WindowX, cfg.WindowY, cfg.Width, cfg.Height, cfg.GroupSize)
 	return nil
 }
 
@@ -850,6 +989,41 @@ func setWindowText(window hwnd, text string) {
 	procSetWindowText.Call(uintptr(window), uintptr(unsafe.Pointer(ptr)))
 }
 
+func currentThreadID() uint32 {
+	threadID, _, _ := procGetCurrentThreadID.Call()
+	return uint32(threadID)
+}
+
+func groupInputProc(window hwnd, message uint32, wParam, lParam uintptr) uintptr {
+	if currentApp == nil || currentApp.groupInput == 0 || window != currentApp.groupInput || currentApp.groupInputProc == 0 {
+		ret, _, _ := procDefWindowProc.Call(uintptr(window), uintptr(message), wParam, lParam)
+		return ret
+	}
+
+	switch message {
+	case wmSetFocus:
+		diaglog.Logf("group input focus")
+		ret := callWindowProc(currentApp.groupInputProc, window, message, wParam, lParam)
+		sendMessage(window, emSetSel, 0, ^uintptr(0))
+		return ret
+	case wmLButtonDown, wmLButtonDblClk:
+		atomic.StoreUint32(&currentApp.dragLogged, 0)
+		diaglog.Logf("group input click message=%#x", message)
+		procSetFocus.Call(uintptr(window))
+		sendMessage(window, emSetSel, 0, ^uintptr(0))
+		return 0
+	case wmMouseMove:
+		if wParam&0x0001 != 0 {
+			if atomic.CompareAndSwapUint32(&currentApp.dragLogged, 0, 1) {
+				diaglog.Logf("group input drag suppressed")
+			}
+			return 0
+		}
+	}
+
+	return callWindowProc(currentApp.groupInputProc, window, message, wParam, lParam)
+}
+
 func getWindowText(window hwnd) string {
 	length, _, _ := procGetWindowTextLength.Call(uintptr(window))
 	buffer := make([]uint16, length+1)
@@ -859,6 +1033,11 @@ func getWindowText(window hwnd) string {
 
 func sendMessage(window hwnd, message uint32, wParam, lParam uintptr) uintptr {
 	ret, _, _ := procSendMessage.Call(uintptr(window), uintptr(message), wParam, lParam)
+	return ret
+}
+
+func callWindowProc(proc uintptr, window hwnd, message uint32, wParam, lParam uintptr) uintptr {
+	ret, _, _ := procCallWindowProc.Call(proc, uintptr(window), uintptr(message), wParam, lParam)
 	return ret
 }
 

@@ -1,0 +1,65 @@
+2026-03-10 18:49:07.401 ========== session start 2026-03-10T18:49:07+08:00 ==========
+2026-03-10 18:49:07.401 logger initialized path="F:\\Project\\Vido_wallpaper_Numbers\\VidoWallpaperNumbers.log" exe="F:\\Project\\Vido_wallpaper_Numbers\\VidoWallpaperNumbers.exe"
+2026-03-10 18:49:07.401 run start
+2026-03-10 18:49:07.405 load config skipped path="F:\\Project\\Vido_wallpaper_Numbers\\VidoWallpaperNumbers.config.json" err=open F:\Project\Vido_wallpaper_Numbers\VidoWallpaperNumbers.config.json: The system cannot find the file specified.
+2026-03-10 18:49:07.405 config loaded window=(0,0 300x150) group_size=30
+2026-03-10 18:49:07.407 window class registered
+2026-03-10 18:49:07.412 window message create
+2026-03-10 18:49:07.412 create controls start
+2026-03-10 18:49:07.412 group input subclass installed hwnd=0x1240c10 old_proc=0x7ffc382217f0
+2026-03-10 18:49:07.412 create controls done group_input=0x1240c10
+2026-03-10 18:49:07.412 layout updated input=(40,19,60,36) button=(112,19,244,55) progress=(40,69,244,91)
+2026-03-10 18:49:07.433 window message size
+2026-03-10 18:49:07.433 layout updated input=(40,19,60,36) button=(112,19,244,55) progress=(40,69,244,91)
+2026-03-10 18:49:07.433 window created hwnd=0x370d22
+2026-03-10 18:49:07.433 layout updated input=(40,19,60,36) button=(112,19,244,55) progress=(40,69,244,91)
+2026-03-10 18:49:09.988 group input click message=0x201
+2026-03-10 18:49:09.989 group input focus
+2026-03-10 18:49:09.997 group input drag suppressed
+2026-03-10 18:49:11.327 start work group_size=30 exe_dir="F:\\Project\\Vido_wallpaper_Numbers"
+2026-03-10 18:49:11.327 process start root="F:\\Project\\Vido_wallpaper_Numbers" group_size=30
+2026-03-10 18:49:11.328 scan completed mp4_count=0
+2026-03-10 18:49:11.328 worker finished with error: 程序所在目录没有可处理的 mp4 文件
+2026-03-10 18:49:11.328 handle worker message queue_len=2
+2026-03-10 18:49:11.328 handle finished event err=程序所在目录没有可处理的 mp4 文件 progress=0
+2026-03-10 18:49:12.669 group input click message=0x201
+2026-03-10 18:49:12.671 group input focus
+2026-03-10 18:49:12.701 group input drag suppressed
+2026-03-10 18:49:13.109 group input click message=0x201
+2026-03-10 18:49:13.180 group input drag suppressed
+2026-03-10 18:49:13.348 group input click message=0x201
+2026-03-10 18:49:13.573 group input click message=0x201
+2026-03-10 18:49:13.604 group input drag suppressed
+2026-03-10 18:49:14.492 group input click message=0x201
+2026-03-10 18:49:14.540 group input drag suppressed
+2026-03-10 18:49:14.845 group input click message=0x201
+2026-03-10 18:49:16.482 window message size
+2026-03-10 18:49:17.318 window message size
+2026-03-10 18:49:17.318 layout updated input=(40,19,60,36) button=(112,19,244,55) progress=(40,69,244,91)
+2026-03-10 18:49:18.108 group input click message=0x201
+2026-03-10 18:49:18.110 group input focus
+2026-03-10 18:49:18.196 group input drag suppressed
+2026-03-10 18:49:23.668 group input click message=0x201
+2026-03-10 18:49:23.716 group input drag suppressed
+2026-03-10 18:49:31.215 start work group_size=15 exe_dir="F:\\Project\\Vido_wallpaper_Numbers"
+2026-03-10 18:49:31.215 process start root="F:\\Project\\Vido_wallpaper_Numbers" group_size=15
+2026-03-10 18:49:31.215 scan completed mp4_count=0
+2026-03-10 18:49:31.215 worker finished with error: 程序所在目录没有可处理的 mp4 文件
+2026-03-10 18:49:31.215 handle worker message queue_len=2
+2026-03-10 18:49:31.215 handle finished event err=程序所在目录没有可处理的 mp4 文件 progress=0
+2026-03-10 18:49:34.729 window message size
+2026-03-10 18:49:35.908 window message size
+2026-03-10 18:49:35.908 layout updated input=(40,19,60,36) button=(112,19,244,55) progress=(40,69,244,91)
+2026-03-10 18:51:50.693 group input click message=0x201
+2026-03-10 18:51:50.694 group input focus
+2026-03-10 18:51:50.724 group input drag suppressed
+2026-03-10 18:51:53.370 window message size
+2026-03-10 18:51:54.291 window message size
+2026-03-10 18:51:54.291 layout updated input=(40,19,60,36) button=(112,19,244,55) progress=(40,69,244,91)
+2026-03-10 18:51:55.157 group input click message=0x201
+2026-03-10 18:51:55.157 group input focus
+2026-03-10 18:51:55.220 group input drag suppressed
+2026-03-10 18:51:58.631 window message close running=false
+2026-03-10 18:51:58.632 save config done path="F:\\Project\\Vido_wallpaper_Numbers\\VidoWallpaperNumbers.config.json" window=(875,174 300x150) group_size=15
+2026-03-10 18:51:58.636 window message destroy
+2026-03-10 18:51:58.636 watchdog stopped
